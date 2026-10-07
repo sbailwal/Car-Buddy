@@ -1,138 +1,28 @@
 import AVFoundation
 
-// Handles Car Buddy's spoken voice.
-//
-// First tries Gemini's natural voice.
-// If Gemini TTS fails, Apple speech is used automatically.
+// Apple's built-in text-to-speech.
+// Gemini is not used for voice.
 
 @MainActor
 final class SpeechSynthesizer {
 
-    // Apple's built-in text-to-speech system.
+    // Apple's speech engine.
     private let synthesizer =
         AVSpeechSynthesizer()
 
-    // Holds Gemini's generated WAV audio while it plays.
-    private var audioPlayer:
-        AVAudioPlayer?
-
-    enum SpeechResult {
-        case natural
-        case fallback(String)
-    }
-
-    // Try natural Gemini speech first.
-    //
-    // If that fails, immediately use Apple's voice
-    // so Car Buddy can still talk.
-    func speak(
-        _ text: String,
-        using aiService: AIService
-    ) async -> SpeechResult {
-
-        // Stop anything that may already be playing.
-        stopSpeaking()
-
-        do {
-
-            // Ask Gemini for natural speech audio.
-            let audioData =
-                try await aiService.generateSpeech(
-                    text
-                )
-
-            // Tell iPhone that we are going to play audio.
-            try AVAudioSession.sharedInstance()
-                .setCategory(
-                    .playback,
-                    mode: .spokenAudio,
-                    options: []
-                )
-
-            try AVAudioSession.sharedInstance()
-                .setActive(true)
-
-            // Create an audio player from Gemini's WAV data.
-            let player =
-                try AVAudioPlayer(
-                    data: audioData
-                )
-
-            audioPlayer = player
-
-            player.prepareToPlay()
-            player.play()
-
-            print("Playing natural Gemini voice")
-
-            return .natural
-
-        } catch let error as AIService.AIError {
-
-            print(
-                "Gemini TTS error:",
-                error
-            )
-
-            // Give the user a useful explanation.
-            switch error {
-
-            case .serverError(429, _):
-
-                speakWithAppleVoice(text)
-
-                return .fallback(
-                    "Natural voice quota reached — using iPhone voice."
-                )
-
-            case .serverError(503, _):
-
-                speakWithAppleVoice(text)
-
-                return .fallback(
-                    "Natural voice service is busy — using iPhone voice."
-                )
-
-            default:
-
-                speakWithAppleVoice(text)
-
-                return .fallback(
-                    "Natural voice unavailable — using iPhone voice."
-                )
-            }
-
-        } catch {
-
-            // Network timeout, no internet, audio decoding error, etc.
-            print(
-                "Gemini TTS unavailable:",
-                error
-            )
-
-            speakWithAppleVoice(text)
-
-            return .fallback(
-                "Natural voice unavailable — using iPhone voice."
-            )
-        }
-    }
-
-    // Apple's reliable fallback voice.
-    private func speakWithAppleVoice(
-        _ text: String
-    ) {
+    // Speak the AI response.
+    func speak(_ text: String) {
 
         let utterance =
             AVSpeechUtterance(
                 string: text
             )
 
+        // Use the best installed US English voice.
         utterance.voice =
-            AVSpeechSynthesisVoice(
-                language: "en-US"
-            )
+            bestEnglishVoice()
 
+        // Speaking speed.
         utterance.rate = 0.5
 
         synthesizer.speak(
@@ -140,11 +30,39 @@ final class SpeechSynthesizer {
         )
     }
 
-    // Stops both Gemini audio and Apple's voice.
-    func stopSpeaking() {
+    // Pick Premium first, then Enhanced, then Default.
+    private func bestEnglishVoice()
+        -> AVSpeechSynthesisVoice? {
 
-        audioPlayer?.stop()
-        audioPlayer = nil
+        let voices =
+            AVSpeechSynthesisVoice
+                .speechVoices()
+                .filter {
+                    $0.language == "en-US"
+                }
+
+        // Use Premium when installed.
+        if let premium =
+            voices.first(where: {
+                $0.quality == .premium
+            }) {
+            return premium
+        }
+
+        // Otherwise use Enhanced.
+        if let enhanced =
+            voices.first(where: {
+                $0.quality == .enhanced
+            }) {
+            return enhanced
+        }
+
+        // Otherwise use the normal English voice.
+        return voices.first
+    }
+
+    // Stop speaking immediately.
+    func stopSpeaking() {
 
         synthesizer.stopSpeaking(
             at: .immediate

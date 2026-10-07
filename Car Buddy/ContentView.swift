@@ -1,112 +1,33 @@
 import SwiftUI
 
-// ============================================================
-// ContentView
-// ============================================================
-//
-// This is the main screen of Car Buddy.
-//
-// We now have FOUR important systems:
-//
-// 1. AudioManager
-//      Gets sound from the microphone.
-//
-// 2. SpeechRecognizer
-//      Turns microphone audio into text.
-//
-// 3. AIService
-//      Receives the user's final sentence and returns
-//      an AI response.
-//
-// 4. SpeechSynthesizer
-//      Speaks the AI response.
-//
-// The flow is now:
-//
-//     YOU SPEAK
-//         ↓
-//     Microphone
-//         ↓
-//     AudioManager
-//         ↓
-//     SpeechRecognizer
-//         ↓
-//     finalRecognizedText
-//         ↓
-//     AIService
-//         ↓
-//     AI response
-//         ↓
-//     SpeechSynthesizer
-//         ↓
-//     YOU HEAR CAR BUDDY
-// ============================================================
-
 struct ContentView: View {
 
-    // ========================================================
-    // MARK: - Screen State
-    // ========================================================
-
-    // true  = Car Buddy is listening
-    // false = Car Buddy is not listening
+    // Screen state.
     @State private var isListening = false
-
-    // Message shown when natural Gemini voice is unavailable.
-    //
-    // Examples:
-    // "Natural voice quota reached — using iPhone voice."
-    // "Natural voice service is busy — using iPhone voice."
-    @State private var speechStatusMessage = ""
-
-    // Latest speech-recognition result.
-    // Changes while the user is speaking.
     @State private var recognizedText = ""
-
-    // This is the sentence we send to the AI.
     @State private var finalRecognizedText = ""
-
-    // AI response.
     @State private var aiResponse = ""
-
-    // true = waiting for the AI response
-    // false = not waiting
     @State private var isWaitingForAI = false
 
-    // ========================================================
-    // MARK: - Managers / Services
-    // ========================================================
+    // Shows Gemini errors on the screen.
+    @State private var statusMessage = ""
 
-    // Controls the microphone.
+    // App services.
     private let audioManager = AudioManager()
-
-    // Controls speech-to-text.
     private let speechRecognizer = SpeechRecognizer()
-
-    // Controls text-to-speech.
     private let speechSynthesizer = SpeechSynthesizer()
-
-    // Sends the user's message to the AI.
     private let aiService = AIService()
 
-    // ========================================================
-    // MARK: - Functions
-    // ========================================================
-
-    // Function 1 — Start listening
-    //
-    // Starts the microphone and SpeechAnalyzer.
+    // Start the microphone and speech recognition.
     private func startListening(
         autoAskAI: Bool = false
     ) async {
 
-        // Clear the previous turn before listening again.
+        // Clear the previous turn.
         recognizedText = ""
         finalRecognizedText = ""
         aiResponse = ""
-
-        // Clear any previous voice-status message.
-        speechStatusMessage = ""
+        statusMessage = ""
 
         // Ask for microphone permission.
         let microphonePermission =
@@ -117,11 +38,7 @@ struct ContentView: View {
             return
         }
 
-        // Start SpeechAnalyzer.
-        //
-        // The speech system is now on-device,
-        // so we no longer ask for the old
-        // SFSpeechRecognizer permission.
+        // Start Apple's SpeechAnalyzer.
         let recognitionStarted =
             await speechRecognizer.startRecognition {
                 text,
@@ -129,17 +46,15 @@ struct ContentView: View {
 
                 Task { @MainActor in
 
-                    // Show the live recognized text.
+                    // Show live speech.
                     recognizedText = text
 
-                    // Save the final sentence.
+                    // Save the finished sentence.
                     if isFinal {
 
                         finalRecognizedText = text
 
-                        // AI TALK:
-                        // automatically send the final sentence
-                        // to the AI.
+                        // AI TALK sends it automatically.
                         if autoAskAI {
 
                             Task {
@@ -155,15 +70,11 @@ struct ContentView: View {
             return
         }
 
-        // Get the audio handler that converts microphone
-        // audio into the format SpeechAnalyzer needs.
+        // Connect microphone audio to SpeechAnalyzer.
         let audioHandler =
             speechRecognizer.makeAudioHandler()
 
         // Start the microphone.
-        //
-        // AudioManager sends each microphone buffer
-        // to this handler.
         let microphoneStarted =
             audioManager.startListening(
                 onAudio: audioHandler
@@ -171,24 +82,16 @@ struct ContentView: View {
 
         guard microphoneStarted else {
 
-            // Finish SpeechAnalyzer because the microphone
-            // could not be started.
             await speechRecognizer.stopRecognition()
 
             print("Microphone failed to start.")
             return
         }
 
-        // The app is now listening.
         isListening = true
     }
 
-    // ========================================================
-    // Function 2 — Ask the AI
-    // ========================================================
-    //
-    // Sends the completed sentence to the AI,
-    // displays the response, and speaks it.
+    // Send the finished sentence to Gemini.
     private func askAI() async {
 
         guard !finalRecognizedText.isEmpty else {
@@ -196,91 +99,103 @@ struct ContentView: View {
             return
         }
 
+        statusMessage = ""
         isWaitingForAI = true
 
         do {
 
-            // Send the user's sentence to the AI.
+            // Gemini generates the text answer.
             let response =
                 try await aiService.sendMessage(
                     finalRecognizedText
                 )
 
-            // Display the AI response.
+            // Show Gemini's answer.
             aiResponse = response
 
-            // Try the natural Gemini voice.
-            //
-            // If Gemini TTS fails, SpeechSynthesizer
-            // automatically falls back to Apple's voice.
-            let speechResult =
-                await speechSynthesizer.speak(
-                    response,
-                    using: aiService
-                )
+            // Apple speaks Gemini's answer.
+            speechSynthesizer.speak(
+                response
+            )
 
-            // Show the result of the voice attempt.
-            switch speechResult {
+        } catch let error as AIService.AIError {
 
-            case .natural:
+            // Convert the error into a user-friendly message.
+            let message: String
 
-                // Natural Gemini voice worked.
-                // No warning is needed.
-                speechStatusMessage = ""
+            switch error {
 
-            case .fallback(let message):
+            case .invalidAPIKey:
+                message =
+                    "Gemini is unavailable because the API key is missing."
 
-                // Gemini voice was unavailable,
-                // so Apple voice was used instead.
-                speechStatusMessage = message
+            case .serverError(429, _):
+                message =
+                    "Gemini quota has been reached. Please try again later."
+
+            case .serverError(503, _):
+                message =
+                    "Gemini is temporarily unavailable. Please try again."
+
+            default:
+                message =
+                    "I couldn't reach Gemini right now. Please try again."
             }
+
+            // Show the message on screen.
+            statusMessage = message
+
+            // Apple speaks the message.
+            speechSynthesizer.speak(
+                message
+            )
+
+            print(
+                "AI ERROR:",
+                error
+            )
 
         } catch {
 
-            print("AI ERROR:", error)
+            // Handle any unexpected error.
+            let message =
+                "Something went wrong. Please try again."
+
+            statusMessage = message
+
+            // Apple speaks the message.
+            speechSynthesizer.speak(
+                message
+            )
+
+            print(
+                "AI ERROR:",
+                error
+            )
         }
 
         isWaitingForAI = false
     }
 
-    // ========================================================
-    // Function 3 — Stop listening
-    // ========================================================
-    //
-    // Stops the microphone and finishes SpeechAnalyzer.
+    // Stop the microphone and finish recognition.
     private func stopListening() async {
 
-        // Stop receiving microphone audio.
         audioManager.stopListening()
 
-        // Let SpeechAnalyzer finish processing
-        // the audio it already received.
         await speechRecognizer.stopRecognition()
 
-        // Update the screen.
         isListening = false
     }
-
-    // ========================================================
-    // MARK: - User Interface
-    // ========================================================
 
     var body: some View {
 
         VStack(spacing: 25) {
 
-            // =================================================
-            // APP TITLE
-            // =================================================
-
             Text("CAR BUDDY")
                 .font(.largeTitle)
                 .fontWeight(.bold)
 
-            // =================================================
-            // LISTENING STATUS
-            // =================================================
-
+            // Show whether Car Buddy is listening.
             Text(
                 isListening
                 ? "Listening..."
@@ -288,10 +203,7 @@ struct ContentView: View {
             )
             .foregroundStyle(.secondary)
 
-            // =================================================
-            // LIVE SPEECH
-            // =================================================
-
+            // Live speech.
             VStack(
                 alignment: .leading,
                 spacing: 10
@@ -300,9 +212,6 @@ struct ContentView: View {
                 Text("You said:")
                     .font(.headline)
 
-                // Display the latest recognized speech.
-                //
-                // This can be a partial result.
                 Text(
                     recognizedText.isEmpty
                     ? "Nothing yet..."
@@ -323,10 +232,7 @@ struct ContentView: View {
                 )
             }
 
-            // =================================================
-            // FINAL SENTENCE
-            // =================================================
-
+            // Final sentence.
             VStack(
                 alignment: .leading,
                 spacing: 10
@@ -335,7 +241,6 @@ struct ContentView: View {
                 Text("Final sentence:")
                     .font(.headline)
 
-                // Display the final recognized sentence.
                 Text(
                     finalRecognizedText.isEmpty
                     ? "Waiting for final result..."
@@ -356,10 +261,7 @@ struct ContentView: View {
                 )
             }
 
-            // =================================================
-            // AI RESPONSE
-            // =================================================
-
+            // Gemini's answer.
             VStack(
                 alignment: .leading,
                 spacing: 10
@@ -368,10 +270,6 @@ struct ContentView: View {
                 Text("Car Buddy:")
                     .font(.headline)
 
-                // Display the AI's response.
-                //
-                // Before we ask the AI anything,
-                // show a placeholder.
                 Text(
                     aiResponse.isEmpty
                     ? "No response yet..."
@@ -391,67 +289,17 @@ struct ContentView: View {
                     )
                 )
 
-                // =================================================
-                // VOICE STATUS MESSAGE
-                // =================================================
-                //
-                // This only appears when the natural Gemini
-                // voice could not be used and Apple voice
-                // was used as the fallback.
+                // Show an error/status message when needed.
+                if !statusMessage.isEmpty {
 
-                if !speechStatusMessage.isEmpty {
-
-                    Text(speechStatusMessage)
+                    Text(statusMessage)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.leading)
                 }
             }
 
-            // =================================================
-            // TALK / STOP BUTTON
-            // =================================================
-            //
-            // This old separate TALK/STOP button is intentionally
-            // commented out because AI TALK now handles the
-            // complete interaction.
-
-            /*
-            Button(
-                isListening ? "STOP" : "TALK"
-            ) {
-
-                if isListening {
-
-                    Task {
-                        await stopListening()
-                    }
-
-                } else {
-
-                    Task {
-                        await startListening()
-                    }
-                }
-            }
-            .font(.title2)
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            */
-
-            // =================================================
-            // AI TALK BUTTON
-            // =================================================
-            //
-            // First tap:
-            //      Start listening
-            //
-            // Second tap:
-            //      Stop listening
-            //
-            // The final speech result is then
-            // automatically sent to the AI.
-
+            // First tap = listen.
+            // Second tap = finish the question.
             Button(
                 isListening
                 ? "DONE ASKING"
@@ -460,14 +308,12 @@ struct ContentView: View {
 
                 if isListening {
 
-                    // Stop listening and finalize the sentence.
                     Task {
                         await stopListening()
                     }
 
                 } else {
 
-                    // Start listening in AI TALK mode.
                     Task {
                         await startListening(
                             autoAskAI: true
@@ -478,38 +324,24 @@ struct ContentView: View {
             .font(.headline)
             .buttonStyle(.bordered)
 
-            // =================================================
-            // STOP TALKING BUTTON
-            // =================================================
-
+            // Stop Apple's voice.
             Button("STOP ANSWERING") {
 
-                // Stop the current AI speech immediately.
                 speechSynthesizer.stopSpeaking()
             }
 
-            // =================================================
-            // NEW CHAT BUTTON
-            // =================================================
-
+            // Start a new Gemini conversation.
             Button("NEW CHAT") {
 
-                // Forget the previous AI conversation.
                 aiService.resetConversation()
 
-                // Clear the text currently displayed on screen.
                 recognizedText = ""
                 finalRecognizedText = ""
                 aiResponse = ""
-
-                // Clear any old voice-status message.
-                speechStatusMessage = ""
+                statusMessage = ""
             }
 
-            // =================================================
-            // WAITING MESSAGE
-            // =================================================
-
+            // Show this while Gemini is responding.
             if isWaitingForAI {
 
                 ProgressView(
@@ -520,10 +352,6 @@ struct ContentView: View {
         .padding()
     }
 }
-
-// ============================================================
-// MARK: - Preview
-// ============================================================
 
 #Preview {
     ContentView()
