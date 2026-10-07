@@ -6,7 +6,7 @@ import SwiftUI
 //
 // This is the main screen of Car Buddy.
 //
-// We now have THREE important systems:
+// We now have FOUR important systems:
 //
 // 1. AudioManager
 //      Gets sound from the microphone.
@@ -17,6 +17,9 @@ import SwiftUI
 // 3. AIService
 //      Receives the user's final sentence and returns
 //      an AI response.
+//
+// 4. SpeechSynthesizer
+//      Speaks the AI response.
 //
 // The flow is now:
 //
@@ -33,8 +36,11 @@ import SwiftUI
 //     AIService
 //         ↓
 //     AI response
+//         ↓
+//     SpeechSynthesizer
+//         ↓
+//     YOU HEAR CAR BUDDY
 // ============================================================
-
 
 struct ContentView: View {
 
@@ -46,24 +52,31 @@ struct ContentView: View {
     // false = Car Buddy is not listening
     @State private var isListening = false
 
+    // Message shown when natural Gemini voice is unavailable.
+    //
+    // Examples:
+    // "Natural voice quota reached — using iPhone voice."
+    // "Natural voice service is busy — using iPhone voice."
+    @State private var speechStatusMessage = ""
 
-    // Latest speech-recognition result, changes while user is speaking.
+    // Latest speech-recognition result.
+    // Changes while the user is speaking.
     @State private var recognizedText = ""
 
-    // THIS is the sentence we will send to the AI.
+    // This is the sentence we send to the AI.
     @State private var finalRecognizedText = ""
 
-    // AI response, e.g. aiResponse = "A black hole is a region ..."
+    // AI response.
     @State private var aiResponse = ""
 
-    // Keeps track of whether we are currently waiting for an AI response.
-    @State private var isWaitingForAI = false // false = not waiting
-
+    // true = waiting for the AI response
+    // false = not waiting
+    @State private var isWaitingForAI = false
 
     // ========================================================
-    // MARK: - Managers - Services used by ContentView
+    // MARK: - Managers / Services
     // ========================================================
-    
+
     // Controls the microphone.
     private let audioManager = AudioManager()
 
@@ -72,22 +85,28 @@ struct ContentView: View {
 
     // Controls text-to-speech.
     private let speechSynthesizer = SpeechSynthesizer()
-    
+
     // Sends the user's message to the AI.
     private let aiService = AIService()
 
-    //===========
-    // Functions
-    //=============
-    
+    // ========================================================
+    // MARK: - Functions
+    // ========================================================
+
     // Function 1 — Start listening
+    //
     // Starts the microphone and SpeechAnalyzer.
-    private func startListening(autoAskAI: Bool = false) async {
+    private func startListening(
+        autoAskAI: Bool = false
+    ) async {
 
         // Clear the previous turn before listening again.
         recognizedText = ""
         finalRecognizedText = ""
         aiResponse = ""
+
+        // Clear any previous voice-status message.
+        speechStatusMessage = ""
 
         // Ask for microphone permission.
         let microphonePermission =
@@ -104,7 +123,9 @@ struct ContentView: View {
         // so we no longer ask for the old
         // SFSpeechRecognizer permission.
         let recognitionStarted =
-            await speechRecognizer.startRecognition { text, isFinal in
+            await speechRecognizer.startRecognition {
+                text,
+                isFinal in
 
                 Task { @MainActor in
 
@@ -161,12 +182,13 @@ struct ContentView: View {
         // The app is now listening.
         isListening = true
     }
-    
-    
+
+    // ========================================================
     // Function 2 — Ask the AI
+    // ========================================================
+    //
     // Sends the completed sentence to the AI,
     // displays the response, and speaks it.
-
     private func askAI() async {
 
         guard !finalRecognizedText.isEmpty else {
@@ -184,11 +206,34 @@ struct ContentView: View {
                     finalRecognizedText
                 )
 
-            // Display the response.
+            // Display the AI response.
             aiResponse = response
 
-            // Speak the response.
-            speechSynthesizer.speak(response)
+            // Try the natural Gemini voice.
+            //
+            // If Gemini TTS fails, SpeechSynthesizer
+            // automatically falls back to Apple's voice.
+            let speechResult =
+                await speechSynthesizer.speak(
+                    response,
+                    using: aiService
+                )
+
+            // Show the result of the voice attempt.
+            switch speechResult {
+
+            case .natural:
+
+                // Natural Gemini voice worked.
+                // No warning is needed.
+                speechStatusMessage = ""
+
+            case .fallback(let message):
+
+                // Gemini voice was unavailable,
+                // so Apple voice was used instead.
+                speechStatusMessage = message
+            }
 
         } catch {
 
@@ -197,8 +242,11 @@ struct ContentView: View {
 
         isWaitingForAI = false
     }
-    
+
+    // ========================================================
     // Function 3 — Stop listening
+    // ========================================================
+    //
     // Stops the microphone and finishes SpeechAnalyzer.
     private func stopListening() async {
 
@@ -212,29 +260,33 @@ struct ContentView: View {
         // Update the screen.
         isListening = false
     }
-    
-    
+
     // ========================================================
-    // User Interface
+    // MARK: - User Interface
     // ========================================================
 
     var body: some View {
 
         VStack(spacing: 25) {
 
-            // App title
+            // =================================================
+            // APP TITLE
+            // =================================================
+
             Text("CAR BUDDY")
                 .font(.largeTitle)
                 .fontWeight(.bold)
 
-            // Listening status
+            // =================================================
+            // LISTENING STATUS
+            // =================================================
+
             Text(
                 isListening
                 ? "Listening..."
                 : "Ready to talk"
             )
             .foregroundStyle(.secondary)
-
 
             // =================================================
             // LIVE SPEECH
@@ -279,6 +331,7 @@ struct ContentView: View {
                 alignment: .leading,
                 spacing: 10
             ) {
+
                 Text("Final sentence:")
                     .font(.headline)
 
@@ -306,6 +359,7 @@ struct ContentView: View {
             // =================================================
             // AI RESPONSE
             // =================================================
+
             VStack(
                 alignment: .leading,
                 spacing: 10
@@ -313,7 +367,6 @@ struct ContentView: View {
 
                 Text("Car Buddy:")
                     .font(.headline)
-
 
                 // Display the AI's response.
                 //
@@ -337,58 +390,81 @@ struct ContentView: View {
                         cornerRadius: 12
                     )
                 )
+
+                // =================================================
+                // VOICE STATUS MESSAGE
+                // =================================================
+                //
+                // This only appears when the natural Gemini
+                // voice could not be used and Apple voice
+                // was used as the fallback.
+
+                if !speechStatusMessage.isEmpty {
+
+                    Text(speechStatusMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.leading)
+                }
             }
 
-//            // =================================================
-//            // TALK / STOP BUTTON -- we will comment out this block of code as we are now using integrated button that sends message directly to AI
-//            // =================================================
-//
-//           // Start or stop normal listening.
-//
-//            Button(
-//                isListening ? "STOP" : "TALK"
-//            ) {
-//
-//                if isListening {
-//
-//                    // Stop the current listening session.
-//                    stopListening()
-//
-//                } else {
-//
-//                    // Start listening.
-//                    Task {
-//                        await startListening()
-//                    }
-//                }
-//            }
-//            .font(.title2)
-//            .buttonStyle(.borderedProminent)
-//            .controlSize(.large)
-
-            
             // =================================================
-            // AI TALK + STOP TALKING BUTTON
+            // TALK / STOP BUTTON
             // =================================================
-            // One button for the complete voice interaction.
             //
-            // First tap: start listening
-            // Second tap: stop listening and ask the AI
+            // This old separate TALK/STOP button is intentionally
+            // commented out because AI TALK now handles the
+            // complete interaction.
 
-            // AI TALK:
-            // first tap = listen
-            // second tap = stop listening
-            // final speech result = automatically sent to AI
-
+            /*
             Button(
-                isListening ? "DONE ASKING" : "ASK AI"
+                isListening ? "STOP" : "TALK"
             ) {
 
                 if isListening {
+
+                    Task {
+                        await stopListening()
+                    }
+
+                } else {
+
+                    Task {
+                        await startListening()
+                    }
+                }
+            }
+            .font(.title2)
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            */
+
+            // =================================================
+            // AI TALK BUTTON
+            // =================================================
+            //
+            // First tap:
+            //      Start listening
+            //
+            // Second tap:
+            //      Stop listening
+            //
+            // The final speech result is then
+            // automatically sent to the AI.
+
+            Button(
+                isListening
+                ? "DONE ASKING"
+                : "ASK AI"
+            ) {
+
+                if isListening {
+
                     // Stop listening and finalize the sentence.
                     Task {
                         await stopListening()
                     }
+
                 } else {
 
                     // Start listening in AI TALK mode.
@@ -401,41 +477,49 @@ struct ContentView: View {
             }
             .font(.headline)
             .buttonStyle(.bordered)
-            
+
             // =================================================
             // STOP TALKING BUTTON
             // =================================================
+
             Button("STOP ANSWERING") {
-                // To intrupt it from answering midway
+
+                // Stop the current AI speech immediately.
                 speechSynthesizer.stopSpeaking()
             }
 
             // =================================================
             // NEW CHAT BUTTON
             // =================================================
+
             Button("NEW CHAT") {
+
                 // Forget the previous AI conversation.
                 aiService.resetConversation()
-                
+
                 // Clear the text currently displayed on screen.
                 recognizedText = ""
                 finalRecognizedText = ""
                 aiResponse = ""
+
+                // Clear any old voice-status message.
+                speechStatusMessage = ""
             }
-            
-            // ------------------------------------------------
-            // Show a waiting message while the AI is working.
-            // ------------------------------------------------
+
+            // =================================================
+            // WAITING MESSAGE
+            // =================================================
 
             if isWaitingForAI {
 
-                ProgressView("Car Buddy is thinking...")
+                ProgressView(
+                    "Car Buddy is thinking..."
+                )
             }
         }
         .padding()
     }
 }
-
 
 // ============================================================
 // MARK: - Preview

@@ -208,7 +208,7 @@ final class AudioManager {
         inputNode.installTap(
             onBus: 0,
             bufferSize: 1024,
-            format: recordingFormat
+            format: nil
         ) { buffer, _ in
 
             // ------------------------------------------------
