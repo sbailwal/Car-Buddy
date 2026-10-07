@@ -81,14 +81,14 @@ struct ContentView: View {
     //=============
     
     // Function 1 — Start listening
-    // Starts the microphone and speech recognition.
+    // Starts the microphone and SpeechAnalyzer.
     private func startListening(autoAskAI: Bool = false) async {
 
         // Clear the previous turn before listening again.
         recognizedText = ""
         finalRecognizedText = ""
         aiResponse = ""
-        
+
         // Ask for microphone permission.
         let microphonePermission =
             await audioManager.requestMicrophonePermission()
@@ -98,33 +98,29 @@ struct ContentView: View {
             return
         }
 
-        // Ask for speech-recognition permission.
-        let speechPermission =
-            await speechRecognizer.requestPermission()
-
-        guard speechPermission else {
-            print("Speech recognition permission denied.")
-            return
-        }
-
-        // Start speech recognition.
+        // Start SpeechAnalyzer.
+        //
+        // The speech system is now on-device,
+        // so we no longer ask for the old
+        // SFSpeechRecognizer permission.
         let recognitionStarted =
-            speechRecognizer.startRecognition { text, isFinal in
+            await speechRecognizer.startRecognition { text, isFinal in
 
                 Task { @MainActor in
 
-                    // Show the words while the user is speaking.
+                    // Show the live recognized text.
                     recognizedText = text
 
-                    // Save the completed sentence.
+                    // Save the final sentence.
                     if isFinal {
 
-                        // Save the completed sentence.
                         finalRecognizedText = text
 
-                        // AI TALK mode: now that we definitely have
-                        // the final sentence, send it to the AI.
+                        // AI TALK:
+                        // automatically send the final sentence
+                        // to the AI.
                         if autoAskAI {
+
                             Task {
                                 await askAI()
                             }
@@ -138,15 +134,26 @@ struct ContentView: View {
             return
         }
 
-        // Start the microphone and send its audio
-        // to SpeechRecognizer.
+        // Get the audio handler that converts microphone
+        // audio into the format SpeechAnalyzer needs.
+        let audioHandler =
+            speechRecognizer.makeAudioHandler()
+
+        // Start the microphone.
+        //
+        // AudioManager sends each microphone buffer
+        // to this handler.
         let microphoneStarted =
-            audioManager.startListening { buffer in
-                speechRecognizer.appendAudioBuffer(buffer)
-            }
+            audioManager.startListening(
+                onAudio: audioHandler
+            )
 
         guard microphoneStarted else {
-            speechRecognizer.stopRecognition()
+
+            // Finish SpeechAnalyzer because the microphone
+            // could not be started.
+            await speechRecognizer.stopRecognition()
+
             print("Microphone failed to start.")
             return
         }
@@ -191,15 +198,16 @@ struct ContentView: View {
         isWaitingForAI = false
     }
     
-    
-    // Stops the microphone and speech recognition.
-    private func stopListening() {
+    // Function 3 — Stop listening
+    // Stops the microphone and finishes SpeechAnalyzer.
+    private func stopListening() async {
 
         // Stop receiving microphone audio.
         audioManager.stopListening()
 
-        // Stop speech recognition.
-        speechRecognizer.stopRecognition()
+        // Let SpeechAnalyzer finish processing
+        // the audio it already received.
+        await speechRecognizer.stopRecognition()
 
         // Update the screen.
         isListening = false
@@ -377,13 +385,10 @@ struct ContentView: View {
             ) {
 
                 if isListening {
-
-                    // Stop listening.
-                    //
-                    // startListening(autoAskAI: true) will send the
-                    // final sentence to askAI() when the final result arrives.
-                    stopListening()
-
+                    // Stop listening and finalize the sentence.
+                    Task {
+                        await stopListening()
+                    }
                 } else {
 
                     // Start listening in AI TALK mode.
