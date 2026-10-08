@@ -4,12 +4,11 @@ struct ContentView: View {
 
     // Screen state.
     @State private var isListening = false
+    @State private var conversationActive = false
     @State private var recognizedText = ""
     @State private var finalRecognizedText = ""
     @State private var aiResponse = ""
     @State private var isWaitingForAI = false
-
-    // Shows Gemini errors on the screen.
     @State private var statusMessage = ""
 
     // App services.
@@ -18,27 +17,62 @@ struct ContentView: View {
     private let speechSynthesizer = SpeechSynthesizer()
     private let aiService = AIService()
 
-    // Start the microphone and speech recognition.
-    private func startListening(
-        autoAskAI: Bool = false
-    ) async {
+    // Start a hands-free conversation.
+    private func startConversation() async {
 
-        // Clear the previous turn.
+        // Check Gemini before starting.
+        guard aiService.hasAPIKey else {
+
+            let message =
+                "Hmm, I can't connect to my AI right now. My Gemini key is missing."
+
+            statusMessage = message
+            speechSynthesizer.speak(message)
+
+            return
+        }
+
+        conversationActive = true
+
         recognizedText = ""
         finalRecognizedText = ""
         aiResponse = ""
         statusMessage = ""
 
-        // Ask for microphone permission.
-        let microphonePermission =
-            await audioManager.requestMicrophonePermission()
+        // Start listening right away.
+        await startListening()
+    }
 
-        guard microphonePermission else {
-            print("Microphone permission denied.")
+    // Start one microphone turn.
+    private func startListening() async {
+
+        guard conversationActive else {
             return
         }
 
-        // Start Apple's SpeechAnalyzer.
+        // Clear the new turn.
+        recognizedText = ""
+        finalRecognizedText = ""
+        statusMessage = ""
+
+        let microphonePermission =
+            await audioManager
+                .requestMicrophonePermission()
+
+        guard microphonePermission else {
+
+            conversationActive = false
+
+            let message =
+                "I need microphone permission before we can talk."
+
+            statusMessage = message
+            speechSynthesizer.speak(message)
+
+            return
+        }
+
+        // Start SpeechAnalyzer.
         let recognitionStarted =
             await speechRecognizer.startRecognition {
                 text,
@@ -49,142 +83,301 @@ struct ContentView: View {
                     // Show live speech.
                     recognizedText = text
 
-                    // Save the finished sentence.
+                    // Save the final result.
                     if isFinal {
-
                         finalRecognizedText = text
-
-                        // AI TALK sends it automatically.
-                        if autoAskAI {
-
-                            Task {
-                                await askAI()
-                            }
-                        }
                     }
                 }
             }
 
         guard recognitionStarted else {
-            print("Speech recognition failed to start.")
+
+            conversationActive = false
+
+            let message =
+                "Hmm, I'm having trouble starting speech recognition."
+
+            statusMessage = message
+            speechSynthesizer.speak(message)
+
             return
         }
 
-        // Connect microphone audio to SpeechAnalyzer.
+        // Connect the microphone to SpeechAnalyzer.
         let audioHandler =
             speechRecognizer.makeAudioHandler()
 
-        // Start the microphone.
+        // Start listening and watch for silence.
         let microphoneStarted =
             audioManager.startListening(
-                onAudio: audioHandler
+                onAudio: audioHandler,
+                onSilence: {
+
+                    Task { @MainActor in
+                        await finishUserTurn()
+                    }
+                }
             )
 
         guard microphoneStarted else {
 
-            await speechRecognizer.stopRecognition()
+            _ = await speechRecognizer.stopRecognition()
 
-            print("Microphone failed to start.")
+            conversationActive = false
+
+            let message =
+                "Hmm, I couldn't get the microphone started."
+
+            statusMessage = message
+            speechSynthesizer.speak(message)
+
             return
         }
 
         isListening = true
     }
 
-    // Send the finished sentence to Gemini.
-    private func askAI() async {
+    // Finish the user's turn.
+    private func finishUserTurn() async {
 
-        guard !finalRecognizedText.isEmpty else {
-            print("No final sentence to send.")
+        guard conversationActive,
+              isListening
+        else {
             return
         }
 
-        statusMessage = ""
+        // Stop listening and get the final sentence.
+        let finalText =
+            await stopListening()
+
+        guard !finalText.isEmpty else {
+
+            // Nothing was recognized.
+            // Listen again.
+            await startListening()
+
+            return
+        }
+
+        // Check whether the user wants to exit.
+        if shouldEndConversation(finalText) {
+
+            await endConversation()
+
+            return
+        }
+
+        // Ask Gemini.
+        //
+        // true  = keep the conversation going
+        // false = stop the conversation
+        let shouldContinue =
+            await askAI()
+
+        guard shouldContinue,
+              conversationActive
+        else {
+            return
+        }
+
+        // Start the next turn automatically.
+        await startListening()
+    }
+
+    // Send the user's sentence to Gemini.
+    //
+    // Returns true when the conversation should continue.
+    private func askAI() async -> Bool {
+
+        guard !finalRecognizedText.isEmpty else {
+            return false
+        }
+
         isWaitingForAI = true
 
         do {
 
-            // Gemini generates the text answer.
+            // Gemini creates the answer.
             let response =
                 try await aiService.sendMessage(
                     finalRecognizedText
                 )
 
-            // Show Gemini's answer.
+            // Show the answer.
             aiResponse = response
 
+            isWaitingForAI = false
+
             // Apple speaks Gemini's answer.
-            speechSynthesizer.speak(
-                response
-            )
+            speechSynthesizer.speak(response)
+
+            // Wait until Car Buddy finishes speaking.
+            await speechSynthesizer
+                .waitUntilFinished()
+
+            return true
 
         } catch let error as AIService.AIError {
 
-            // Convert the error into a user-friendly message.
+            isWaitingForAI = false
+
             let message: String
 
             switch error {
 
             case .invalidAPIKey:
+
                 message =
-                    "Gemini is unavailable because the API key is missing."
+                    "Hmm, I can't connect to my AI right now. My Gemini key is missing."
 
             case .serverError(429, _):
+
                 message =
-                    "Gemini quota has been reached. Please try again later."
+                    "Looks like I've hit my Gemini limit for now. We can try again later."
 
             case .serverError(503, _):
+
                 message =
-                    "Gemini is temporarily unavailable. Please try again."
+                    "Hmm, Gemini is having a busy moment. We can try again later."
 
             default:
+
                 message =
-                    "I couldn't reach Gemini right now. Please try again."
+                    "Hmm, I'm having trouble connecting right now. We can try again later."
             }
 
-            // Show the message on screen.
+            // Show the problem.
             statusMessage = message
 
-            // Apple speaks the message.
-            speechSynthesizer.speak(
-                message
-            )
+            // End the hands-free session.
+            //
+            // This is important: otherwise the microphone
+            // could hear this message and start the loop again.
+            conversationActive = false
+
+            // Speak the problem using Apple's voice.
+            speechSynthesizer.speak(message)
+
+            await speechSynthesizer
+                .waitUntilFinished()
 
             print(
                 "AI ERROR:",
                 error
             )
+
+            return false
 
         } catch {
 
-            // Handle any unexpected error.
+            isWaitingForAI = false
+
             let message =
-                "Something went wrong. Please try again."
+                "Oops, something went wrong on my end. We can try again later."
 
             statusMessage = message
 
-            // Apple speaks the message.
-            speechSynthesizer.speak(
-                message
-            )
+            // Stop the automatic conversation.
+            conversationActive = false
+
+            // Speak the problem.
+            speechSynthesizer.speak(message)
+
+            await speechSynthesizer
+                .waitUntilFinished()
 
             print(
                 "AI ERROR:",
                 error
             )
-        }
 
-        isWaitingForAI = false
+            return false
+        }
     }
 
-    // Stop the microphone and finish recognition.
-    private func stopListening() async {
+    // Stop the current microphone turn.
+    private func stopListening() async -> String {
 
         audioManager.stopListening()
 
-        await speechRecognizer.stopRecognition()
+        let finalText =
+            await speechRecognizer.stopRecognition()
 
         isListening = false
+
+        finalRecognizedText = finalText
+
+        return finalText
+    }
+
+    // Check for a spoken exit phrase.
+    private func shouldEndConversation(
+        _ text: String
+    ) -> Bool {
+
+        let text =
+            text
+                .lowercased()
+                .trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                )
+
+        let exitPhrases = [
+            "bye",
+            "goodbye",
+            "i'm done",
+            "im done",
+            "i am done",
+            "stop conversation",
+            "end conversation"
+        ]
+
+        // Require the exit phrase to be a complete word/phrase.
+        return exitPhrases.contains { phrase in
+
+            text == phrase ||
+            text.hasPrefix(phrase + " ") ||
+            text.hasSuffix(" " + phrase)
+        }
+    }
+
+    // End the hands-free conversation.
+    private func endConversation() async {
+
+        conversationActive = false
+
+        if isListening {
+            _ = await stopListening()
+        }
+
+        speechSynthesizer.stopSpeaking()
+
+        let goodbye =
+            "Okay, talk to you later!"
+
+        aiResponse = goodbye
+
+        speechSynthesizer.speak(goodbye)
+    }
+
+    // Reset everything and start a fresh Gemini chat.
+    private func newChat() async {
+
+        conversationActive = false
+
+        if isListening {
+            _ = await stopListening()
+        }
+
+        speechSynthesizer.stopSpeaking()
+
+        aiService.resetConversation()
+
+        recognizedText = ""
+        finalRecognizedText = ""
+        aiResponse = ""
+        statusMessage = ""
+        isWaitingForAI = false
     }
 
     var body: some View {
@@ -195,10 +388,16 @@ struct ContentView: View {
                 .font(.largeTitle)
                 .fontWeight(.bold)
 
-            // Show whether Car Buddy is listening.
+            // Show what Car Buddy is doing.
             Text(
-                isListening
-                ? "Listening..."
+                conversationActive
+                ? (
+                    isWaitingForAI
+                    ? "Thinking..."
+                    : isListening
+                        ? "Listening..."
+                        : "Speaking..."
+                )
                 : "Ready to talk"
             )
             .foregroundStyle(.secondary)
@@ -289,7 +488,7 @@ struct ContentView: View {
                     )
                 )
 
-                // Show an error/status message when needed.
+                // Show errors or status messages.
                 if !statusMessage.isEmpty {
 
                     Text(statusMessage)
@@ -298,26 +497,24 @@ struct ContentView: View {
                 }
             }
 
-            // First tap = listen.
-            // Second tap = finish the question.
+            // One tap starts the conversation.
+            // The conversation then runs hands-free.
             Button(
-                isListening
-                ? "DONE ASKING"
+                conversationActive
+                ? "END CONVERSATION"
                 : "ASK AI"
             ) {
 
-                if isListening {
+                if conversationActive {
 
                     Task {
-                        await stopListening()
+                        await endConversation()
                     }
 
                 } else {
 
                     Task {
-                        await startListening(
-                            autoAskAI: true
-                        )
+                        await startConversation()
                     }
                 }
             }
@@ -330,18 +527,15 @@ struct ContentView: View {
                 speechSynthesizer.stopSpeaking()
             }
 
-            // Start a new Gemini conversation.
+            // Start a fresh Gemini conversation.
             Button("NEW CHAT") {
 
-                aiService.resetConversation()
-
-                recognizedText = ""
-                finalRecognizedText = ""
-                aiResponse = ""
-                statusMessage = ""
+                Task {
+                    await newChat()
+                }
             }
 
-            // Show this while Gemini is responding.
+            // Show this while Gemini is working.
             if isWaitingForAI {
 
                 ProgressView(

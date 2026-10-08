@@ -1,305 +1,238 @@
 import AVFoundation
 
-// ============================================================
-// AudioManager
-// ============================================================
-//
-// PURPOSE:
-//
-// AudioManager is responsible for getting live audio from
-// the iPhone's microphone.
-//
-// Think of this class as:
-//
-//     "The person operating the microphone."
-//
-// Its job is NOT to understand what you are saying.
-//
-// Its job is only:
-//
-//     Microphone
-//         ↓
-//     receive audio
-//         ↓
-//     give audio to the next part of the app
-//
-// The next part will be SpeechRecognizer.
-//
-// Eventually:
-//
-//     YOU SPEAK
-//         ↓
-//     Microphone
-//         ↓
-//     AudioManager
-//         ↓
-//     SpeechRecognizer
-//         ↓
-//     TEXT
-// ============================================================
-
+// Controls the iPhone microphone.
 
 final class AudioManager {
 
-    // ========================================================
-    // MARK: - Audio Engine
-    // ========================================================
+    private let audioEngine =
+        AVAudioEngine()
 
-    // AVAudioEngine is Apple's system for working with
-    // live audio.
-    //
-    // We use one audio engine to receive microphone audio.
-    private let audioEngine = AVAudioEngine()
+    // Used to detect when the user stops talking.
+    private var hasDetectedSpeech = false
+    private var silenceStartTime:
+        TimeInterval?
 
+    private var silenceReported = false
 
-    // ========================================================
-    // MARK: - Microphone Permission
-    // ========================================================
+    // How long the user must be quiet before
+    // Car Buddy treats the turn as finished.
+    private let silenceDuration:
+        TimeInterval = 1.5
 
-    // This function asks iOS for permission to use
-    // the microphone.
-    //
-    // It returns:
-    //
-    //     true  = user allowed microphone access
-    //     false = user denied microphone access
-    //
-    // "async" means the function may need to WAIT for iOS
-    // to finish asking the user.
-    func requestMicrophonePermission() async -> Bool {
+    // Audio level above this counts as speech.
+    private let speechThreshold:
+        Float = 0.015
 
-        // Ask Apple's AVFAudio system for microphone permission.
-        return await AVAudioApplication.requestRecordPermission()
+    // Ask iOS for microphone permission.
+    func requestMicrophonePermission()
+        async -> Bool {
+
+        return await
+            AVAudioApplication
+                .requestRecordPermission()
     }
 
-
-    // ========================================================
-    // MARK: - Start Listening
-    // ========================================================
-
-    // This function starts receiving audio from the microphone.
-    //
-    // "onAudio" is a CLOSURE.
-    //
-    // A closure is basically a function we can hand to
-    // another function.
-    //
-    // We are saying:
-    //
-    //     "AudioManager, whenever you receive a new piece
-    //      of microphone audio, call this function."
-    //
-    // The function receives:
-    //
-    //     AVAudioPCMBuffer
-    //
-    // which is one small chunk of audio.
-    //
-    // The function returns:
-    //
-    //     true  = microphone started
-    //     false = microphone could not start
+    // Start the microphone and watch for silence.
     func startListening(
-        onAudio: @escaping (AVAudioPCMBuffer) -> Void
+        onAudio:
+            @escaping (AVAudioPCMBuffer) -> Void,
+        onSilence:
+            @escaping @Sendable () -> Void
     ) -> Bool {
 
-        // ====================================================
-        // STEP 1 — Get the microphone input node
-        // ====================================================
+        // This app both records and plays audio.
+        let session =
+            AVAudioSession.sharedInstance()
 
-        // AVAudioEngine contains different audio nodes.
-        //
-        // The input node represents audio COMING INTO
-        // the app.
-        //
-        // In our case:
-        //
-        //     iPhone microphone
-        //            ↓
-        //       inputNode
-        let inputNode = audioEngine.inputNode
+        do {
 
+            try session.setCategory(
+                .playAndRecord,
+                mode: .default,
+                options: [.defaultToSpeaker]
+            )
+            
+            // Reduce Car Buddy's own voice being picked up by the mic.
+            if session.isEchoCancelledInputAvailable {
+                try? session.setPrefersEchoCancelledInput(true)
+            }
+            
+            try session.setActive(true)
 
-        // ====================================================
-        // STEP 2 — Find the microphone's audio format
-        // ====================================================
+        } catch {
 
-        // The microphone has an audio format.
-        //
-        // The format contains information such as:
-        //
-        //     sample rate
-        //     channel count
-        //     audio format
-        //
-        // We ask Apple's audio system what format the
-        // microphone is currently producing.
-        let recordingFormat =
-            inputNode.outputFormat(forBus: 0)
+            print(
+                "Could not configure audio session:",
+                error
+            )
 
-
-        // ====================================================
-        // STEP 3 — Make sure the format is valid
-        // ====================================================
-
-        // Earlier, when testing the Simulator, we encountered
-        // a crash caused by an invalid audio format.
-        //
-        // For example:
-        //
-        //     sample rate = 0
-        //     channel count = 0
-        //
-        // That is not usable microphone audio.
-        //
-        // So we check BEFORE installing the microphone tap.
-        guard recordingFormat.sampleRate > 0,
-              recordingFormat.channelCount > 0 else {
-
-            print("No usable microphone input.")
-
-            // Tell ContentView:
-            //
-            // "The microphone did not start."
             return false
         }
 
+        let inputNode =
+            audioEngine.inputNode
 
-        // ====================================================
-        // STEP 4 — Remove an old microphone tap
-        // ====================================================
+        let recordingFormat =
+            inputNode.outputFormat(
+                forBus: 0
+            )
 
-        // A "tap" is a listener attached to an audio node.
-        //
-        // It allows us to receive copies of incoming audio.
-        //
-        // Apple allows only ONE tap on a particular bus.
-        //
-        // Therefore we remove an old tap before installing
-        // a new one.
-        //
-        // This is especially important when the user:
-        //
-        //     TALK → STOP → TALK
-        //
-        // without this cleanup, a second tap could cause
-        // problems.
-        inputNode.removeTap(onBus: 0)
+        guard recordingFormat.sampleRate > 0,
+              recordingFormat.channelCount > 0
+        else {
 
+            print(
+                "No usable microphone input."
+            )
 
-        // ====================================================
-        // STEP 5 — Install the microphone tap
-        // ====================================================
+            return false
+        }
 
-        // Now we attach our listener to the microphone.
-        //
-        // Every time new microphone audio arrives,
-        // Apple's audio system calls the code inside:
-        //
-        //     { buffer, _ in
-        //
-        //             ...
-        //
-        //     }
-        //
-        // "buffer" is the audio chunk.
-        //
-        // We then give that buffer to "onAudio".
+        // Reset silence detection for this turn.
+        hasDetectedSpeech = false
+        silenceStartTime = nil
+        silenceReported = false
+
+        // Remove any old tap.
+        inputNode.removeTap(
+            onBus: 0
+        )
+
+        // Use the microphone's real format.
+        // SpeechRecognizer converts it later.
         inputNode.installTap(
             onBus: 0,
             bufferSize: 1024,
             format: nil
-        ) { buffer, _ in
+        ) { [weak self] buffer, _ in
 
-            // ------------------------------------------------
-            // Send this audio chunk to the caller.
-            // ------------------------------------------------
-            //
-            // In our Car Buddy app, the caller will be
-            // ContentView.
-            //
-            // ContentView will immediately send this
-            // buffer to SpeechRecognizer.
+            // Send audio to SpeechAnalyzer.
             onAudio(buffer)
 
-
-            // Print this so we can see in Xcode that
-            // the microphone is actually producing audio.
-            print("Receiving microphone audio")
+            // Check for the end of speech.
+            self?.checkForSilence(
+                in: buffer,
+                onSilence: onSilence
+            )
         }
 
-
-        // ====================================================
-        // STEP 6 — Prepare the audio engine
-        // ====================================================
-
-        // prepare() gets the audio engine ready to run.
         audioEngine.prepare()
 
-
-        // ====================================================
-        // STEP 7 — Start the audio engine
-        // ====================================================
-
-        // Starting the audio engine can fail.
-        //
-        // Therefore we use:
-        //
-        //     do
-        //     try
-        //     catch
-        //
-        // "try" means:
-        //
-        //     "This operation might fail."
-        //
-        // "catch" handles the failure.
         do {
 
-            // Actually start microphone audio processing.
             try audioEngine.start()
 
-
-            // This tells us the microphone successfully started.
             print("Microphone started")
 
-
-            // Tell ContentView that startup succeeded.
             return true
 
         } catch {
 
-            // Something prevented the microphone from starting.
             print(
                 "Could not start microphone:",
                 error
             )
 
+            inputNode.removeTap(
+                onBus: 0
+            )
 
-            // Tell ContentView that startup failed.
             return false
         }
     }
 
+    // Detect silence after the user has spoken.
+    private func checkForSilence(
+        in buffer: AVAudioPCMBuffer,
+        onSilence:
+            @escaping @Sendable () -> Void
+    ) {
 
-    // ========================================================
-    // MARK: - Stop Listening
-    // ========================================================
+        guard let channel =
+                buffer.floatChannelData?.pointee
+        else {
+            return
+        }
 
-    // This function stops receiving microphone audio.
+        let frameCount =
+            Int(buffer.frameLength)
+
+        guard frameCount > 0 else {
+            return
+        }
+
+        var total: Float = 0
+
+        for index in 0..<frameCount {
+
+            let sample =
+                channel[index]
+
+            total += sample * sample
+        }
+
+        let meanSquare =
+            total / Float(frameCount)
+
+        let thresholdSquared =
+            speechThreshold *
+            speechThreshold
+
+        let isSpeech =
+            meanSquare >
+            thresholdSquared
+
+        let now =
+            ProcessInfo
+                .processInfo
+                .systemUptime
+
+        if isSpeech {
+
+            // We know the user has spoken.
+            hasDetectedSpeech = true
+
+            // Speech means the silence timer is reset.
+            silenceStartTime = nil
+            silenceReported = false
+
+        } else if hasDetectedSpeech &&
+                    !silenceReported {
+
+            if silenceStartTime == nil {
+                silenceStartTime = now
+            }
+
+            if let silenceStartTime,
+               now - silenceStartTime >=
+                    silenceDuration {
+
+                silenceReported = true
+
+                // Tell ContentView on the main thread.
+                DispatchQueue.main.async {
+                    onSilence()
+                }
+            }
+        }
+    }
+
+    // Stop the microphone.
     func stopListening() {
 
-        // Remove the microphone tap.
-        //
-        // This disconnects our listener from the microphone.
-        audioEngine.inputNode.removeTap(onBus: 0)
+        audioEngine.inputNode.removeTap(
+            onBus: 0
+        )
 
-
-        // Stop the audio engine.
         audioEngine.stop()
 
-
-        // Print a message so we can verify the stop operation.
         print("Microphone stopped")
+
+        try? AVAudioSession.sharedInstance()
+            .setActive(
+                false,
+                options:
+                    .notifyOthersOnDeactivation
+            )
     }
 }

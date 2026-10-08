@@ -18,10 +18,12 @@ final class SpeechSynthesizer {
                 string: text
             )
 
-        // Use the best installed US English voice.
+        // Use Apple's US English voice.
         utterance.voice =
-            bestEnglishVoice()
-
+            AVSpeechSynthesisVoice(
+                language: "en-US"
+            )
+        
         // Speaking speed.
         utterance.rate = 0.5
 
@@ -30,35 +32,16 @@ final class SpeechSynthesizer {
         )
     }
 
-    // Pick Premium first, then Enhanced, then Default.
-    private func bestEnglishVoice()
-        -> AVSpeechSynthesisVoice? {
+    // Wait until Apple finishes speaking.
+    func waitUntilFinished() async {
 
-        let voices =
-            AVSpeechSynthesisVoice
-                .speechVoices()
-                .filter {
-                    $0.language == "en-US"
-                }
+        while synthesizer.isSpeaking {
 
-        // Use Premium when installed.
-        if let premium =
-            voices.first(where: {
-                $0.quality == .premium
-            }) {
-            return premium
+            try? await Task.sleep(
+                nanoseconds:
+                    100_000_000
+            )
         }
-
-        // Otherwise use Enhanced.
-        if let enhanced =
-            voices.first(where: {
-                $0.quality == .enhanced
-            }) {
-            return enhanced
-        }
-
-        // Otherwise use the normal English voice.
-        return voices.first
     }
 
     // Stop speaking immediately.

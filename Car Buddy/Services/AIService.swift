@@ -8,6 +8,11 @@ final class AIService {
     // Put your Gemini API key here.
     private let apiKey = ""
 
+    // Lets ContentView check the key before starting.
+    var hasAPIKey: Bool {
+        !apiKey.isEmpty
+    }
+
     // Try each model if Google returns 503.
     private let models = [
         "gemini-3.8-flash",
@@ -23,8 +28,9 @@ final class AIService {
 
     Talk like a real person sitting in the car, not like a textbook.
 
-    Keep most answers short and natural, usually 2 to 5 sentences unless the user asks for more detail.
-
+    Keep normal answers to 1 or 2 short sentences, about 25 to 45 words total.
+    Only give a longer answer when the user asks for more detail.
+    
     Use contractions and everyday language.
 
     Be warm, curious, lightly playful, and conversational.
@@ -77,7 +83,7 @@ final class AIService {
         _ message: String
     ) async throws -> String {
 
-        guard !apiKey.isEmpty else {
+        guard hasAPIKey else {
             throw AIError.invalidAPIKey
         }
 
@@ -91,6 +97,7 @@ final class AIService {
         for model in models {
 
             do {
+
                 let request =
                     try makeRequest(
                         model: model,
@@ -114,8 +121,7 @@ final class AIService {
                     throw AIError.invalidResponse
                 }
 
-                // 503 = this model is temporarily unavailable.
-                // Try the next model.
+                // 503 = model temporarily unavailable.
                 if httpResponse.statusCode == 503 {
 
                     print(
@@ -158,7 +164,7 @@ final class AIService {
                         from: data
                     )
 
-                // Find Gemini's generated answer.
+                // Find Gemini's answer.
                 guard let text =
                         extractText(
                             from: geminiResponse
@@ -190,7 +196,6 @@ final class AIService {
             }
         }
 
-        // All models failed.
         throw lastError ?? AIError.noTextReturned
     }
 
@@ -222,10 +227,13 @@ final class AIService {
         var body: [String: Any] = [
             "model": model,
             "input": message,
-            "system_instruction": systemInstruction
+            "system_instruction": systemInstruction,
+            "generation_config": [
+                "max_output_tokens": 80
+            ]
         ]
 
-        // Continue the previous conversation.
+        // Continue the existing conversation.
         if let previousInteractionID {
             body["previous_interaction_id"] =
                 previousInteractionID
@@ -270,7 +278,7 @@ final class AIService {
         return nil
     }
 
-    // Starts a completely new conversation.
+    // Start a completely new conversation.
     func resetConversation() {
         previousInteractionID = nil
     }
