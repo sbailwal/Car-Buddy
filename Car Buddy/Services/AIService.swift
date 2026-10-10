@@ -22,6 +22,9 @@ final class AIService {
         "gemini-3.5-flash-lite"
     ]
 
+//    "You are an alert, high-energy co-pilot riding shotgun with a driver. Your job is to keep them awake. Keep your responses under 2 sentences. Ask direct, engaging questions (e.g., 'What was the last song you heard?', 'Where are you headed?'). Never sound robotic. If they don't answer in 5 seconds, prompt them again firmly."
+    
+    
     // Tells Gemini how Car Buddy should talk.
     private let systemInstruction = """
     You are Car Buddy, a smart, friendly conversational passenger.
@@ -56,6 +59,7 @@ final class AIService {
     // These structures match the JSON we need from Gemini.
     private struct GeminiResponse: Decodable {
         let id: String?
+        let status: String?
         let steps: [Step]?
     }
 
@@ -76,6 +80,7 @@ final class AIService {
         case invalidResponse
         case serverError(Int, String)
         case noTextReturned
+        case incompleteResponse
     }
 
     // Sends one user message to Gemini.
@@ -163,6 +168,14 @@ final class AIService {
                         GeminiResponse.self,
                         from: data
                     )
+                // Never let Car Buddy speak a response that Gemini
+                // explicitly reports as incomplete.
+                guard geminiResponse.status == nil ||
+                      geminiResponse.status == "completed" else {
+
+                    print("Gemini response was incomplete:", geminiResponse.status ?? "unknown")
+                    throw AIError.incompleteResponse
+                }
 
                 // Find Gemini's answer.
                 guard let text =
@@ -229,7 +242,7 @@ final class AIService {
             "input": message,
             "system_instruction": systemInstruction,
             "generation_config": [
-                "max_output_tokens": 80
+                "thinking_level": "low"
             ]
         ]
 

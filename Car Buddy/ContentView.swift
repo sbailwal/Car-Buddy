@@ -5,322 +5,243 @@ struct ContentView: View {
     // Screen state.
     @State private var isListening = false
     @State private var conversationActive = false
+    @State private var isFinishingTurn = false
+    @State private var isWaitingForAI = false
+
     @State private var recognizedText = ""
     @State private var finalRecognizedText = ""
     @State private var aiResponse = ""
-    @State private var isWaitingForAI = false
     @State private var statusMessage = ""
 
-    // App services.
-    private let audioManager = AudioManager()
-    private let speechRecognizer = SpeechRecognizer()
-    private let speechSynthesizer = SpeechSynthesizer()
-    private let aiService = AIService()
+    // Keep the same service objects throughout the conversation.
+    @State private var audioManager = AudioManager()
+    @State private var speechRecognizer = SpeechRecognizer()
+    @State private var speechSynthesizer = SpeechSynthesizer()
+    @State private var aiService = AIService()
 
-    // Start a hands-free conversation.
+    // Start a fresh hands-free conversation.
     private func startConversation() async {
 
-        // Check Gemini before starting.
+        guard !conversationActive else { return }
+
         guard aiService.hasAPIKey else {
-
-            let message =
-                "Hmm, I can't connect to my AI right now. My Gemini key is missing."
-
-            statusMessage = message
-            speechSynthesizer.speak(message)
-
+            statusMessage = "My Gemini key is missing."
+            speechSynthesizer.speak(
+                "I can't connect to my AI right now. My Gemini key is missing."
+            )
             return
         }
 
-        conversationActive = true
+        aiService.resetConversation()
 
+        conversationActive = true
         recognizedText = ""
         finalRecognizedText = ""
         aiResponse = ""
         statusMessage = ""
 
-        // Start listening right away.
         await startListening()
     }
 
     // Start one microphone turn.
     private func startListening() async {
 
-        guard conversationActive else {
+        guard conversationActive,
+              !isListening,
+              !isFinishingTurn else {
             return
         }
 
-        // Clear the new turn.
         recognizedText = ""
         finalRecognizedText = ""
         statusMessage = ""
 
-        let microphonePermission =
-            await audioManager
-                .requestMicrophonePermission()
-
-        guard microphonePermission else {
-
-            conversationActive = false
-
-            let message =
+        guard await audioManager.requestMicrophonePermission() else {
+            await stopWithMessage(
                 "I need microphone permission before we can talk."
-
-            statusMessage = message
-            speechSynthesizer.speak(message)
-
+            )
             return
         }
 
-        // Start SpeechAnalyzer.
-        let recognitionStarted =
-            await speechRecognizer.startRecognition {
-                text,
-                isFinal in
+        // Start Apple's speech recognition first.
+        let recognitionStarted = await speechRecognizer.startRecognition {
+            text, isFinal in
 
-                Task { @MainActor in
+            Task { @MainActor in
+                recognizedText = text
 
-                    // Show live speech.
-                    recognizedText = text
-
-                    // Save the final result.
-                    if isFinal {
-                        finalRecognizedText = text
-                    }
+                if isFinal {
+                    finalRecognizedText = text
                 }
             }
+        }
 
         guard recognitionStarted else {
-
-            conversationActive = false
-
-            let message =
-                "Hmm, I'm having trouble starting speech recognition."
-
-            statusMessage = message
-            speechSynthesizer.speak(message)
-
+            await stopWithMessage(
+                "I'm having trouble starting speech recognition."
+            )
             return
         }
 
-        // Connect the microphone to SpeechAnalyzer.
-        let audioHandler =
-            speechRecognizer.makeAudioHandler()
+        let audioHandler = speechRecognizer.makeAudioHandler()
 
-        // Start listening and watch for silence.
-        let microphoneStarted =
-            audioManager.startListening(
-                onAudio: audioHandler,
-                onSilence: {
-
-                    Task { @MainActor in
-                        await finishUserTurn()
-                    }
+        // Start the microphone and wait for the end of speech.
+        let microphoneStarted = audioManager.startListening(
+            onAudio: audioHandler,
+            onSilence: {
+                Task { @MainActor in
+                    await finishUserTurn()
                 }
-            )
+            }
+        )
 
         guard microphoneStarted else {
-
             _ = await speechRecognizer.stopRecognition()
 
-            conversationActive = false
-
-            let message =
-                "Hmm, I couldn't get the microphone started."
-
-            statusMessage = message
-            speechSynthesizer.speak(message)
-
+            await stopWithMessage(
+                "I couldn't start the microphone."
+            )
             return
         }
 
         isListening = true
     }
 
-    // Finish the user's turn.
+    // Finalize the transcript, check for exit, then ask Gemini.
     private func finishUserTurn() async {
 
         guard conversationActive,
-              isListening
-        else {
+              isListening,
+              !isFinishingTurn else {
             return
         }
 
-        // Stop listening and get the final sentence.
-        let finalText =
-            await stopListening()
+        isFinishingTurn = true
 
-        guard !finalText.isEmpty else {
+        let finalText = await stopListening()
 
-            // Nothing was recognized.
-            // Listen again.
+        // The user may have ended the conversation during finalization.
+        guard conversationActive else {
+            isFinishingTurn = false
+            return
+        }
+
+        guard !finalText.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).isEmpty else {
+            isFinishingTurn = false
             await startListening()
-
             return
         }
 
-        // Check whether the user wants to exit.
+        finalRecognizedText = finalText
+
+        // Exit locally. Don't send this phrase to Gemini.
         if shouldEndConversation(finalText) {
-
+            isFinishingTurn = false
             await endConversation()
-
             return
         }
 
-        // Ask Gemini.
-        //
-        // true  = keep the conversation going
-        // false = stop the conversation
-        let shouldContinue =
-            await askAI()
+        let shouldContinue = await askAI()
 
-        guard shouldContinue,
-              conversationActive
-        else {
-            return
+        isFinishingTurn = false
+
+        // Listen again only if the conversation is still active.
+        if shouldContinue && conversationActive {
+            await startListening()
         }
-
-        // Start the next turn automatically.
-        await startListening()
     }
 
-    // Send the user's sentence to Gemini.
-    //
-    // Returns true when the conversation should continue.
+    // Send the finished sentence to Gemini and speak its answer.
     private func askAI() async -> Bool {
 
-        guard !finalRecognizedText.isEmpty else {
+        guard conversationActive,
+              !finalRecognizedText.isEmpty else {
             return false
         }
 
         isWaitingForAI = true
 
         do {
+            let response = try await aiService.sendMessage(
+                finalRecognizedText
+            )
 
-            // Gemini creates the answer.
-            let response =
-                try await aiService.sendMessage(
-                    finalRecognizedText
-                )
+            // Don't speak an answer that arrives after the user exits.
+            guard conversationActive else {
+                isWaitingForAI = false
+                return false
+            }
 
-            // Show the answer.
             aiResponse = response
-
             isWaitingForAI = false
 
-            // Apple speaks Gemini's answer.
             speechSynthesizer.speak(response)
+            await speechSynthesizer.waitUntilFinished()
 
-            // Wait until Car Buddy finishes speaking.
-            await speechSynthesizer
-                .waitUntilFinished()
-
-            return true
+            // STOP ANSWERING interrupts speech; the conversation
+            // can then continue by opening the microphone again.
+            return conversationActive
 
         } catch let error as AIService.AIError {
-
-            isWaitingForAI = false
 
             let message: String
 
             switch error {
-
             case .invalidAPIKey:
-
-                message =
-                    "Hmm, I can't connect to my AI right now. My Gemini key is missing."
-
+                message = "My Gemini key is missing."
             case .serverError(429, _):
-
-                message =
-                    "Looks like I've hit my Gemini limit for now. We can try again later."
-
+                message = "I've hit my Gemini limit for now."
             case .serverError(503, _):
-
-                message =
-                    "Hmm, Gemini is having a busy moment. We can try again later."
-
+                message = "Gemini is busy right now."
             default:
-
-                message =
-                    "Hmm, I'm having trouble connecting right now. We can try again later."
+                message = "I'm having trouble connecting to my AI."
             }
 
-            // Show the problem.
-            statusMessage = message
-
-            // End the hands-free session.
-            //
-            // This is important: otherwise the microphone
-            // could hear this message and start the loop again.
-            conversationActive = false
-
-            // Speak the problem using Apple's voice.
-            speechSynthesizer.speak(message)
-
-            await speechSynthesizer
-                .waitUntilFinished()
-
-            print(
-                "AI ERROR:",
-                error
-            )
-
+            await stopWithMessage(message)
+            print("AI ERROR:", error)
             return false
 
         } catch {
-
-            isWaitingForAI = false
-
-            let message =
-                "Oops, something went wrong on my end. We can try again later."
-
-            statusMessage = message
-
-            // Stop the automatic conversation.
-            conversationActive = false
-
-            // Speak the problem.
-            speechSynthesizer.speak(message)
-
-            await speechSynthesizer
-                .waitUntilFinished()
-
-            print(
-                "AI ERROR:",
-                error
+            await stopWithMessage(
+                "Something went wrong. We can try again later."
             )
-
+            print("AI ERROR:", error)
             return false
         }
     }
 
-    // Stop the current microphone turn.
+    // Stop the microphone and get Apple's finalized transcript.
     private func stopListening() async -> String {
 
+        // Change the state immediately to prevent duplicate turn handling.
+        isListening = false
         audioManager.stopListening()
 
-        let finalText =
-            await speechRecognizer.stopRecognition()
-
-        isListening = false
-
+        let finalText = await speechRecognizer.stopRecognition()
         finalRecognizedText = finalText
 
         return finalText
     }
 
-    // Check for a spoken exit phrase.
-    private func shouldEndConversation(
-        _ text: String
-    ) -> Bool {
+    // Normalize punctuation so "Bye." and "I'm done!" work.
+    private func shouldEndConversation(_ text: String) -> Bool {
 
-        let text =
-            text
-                .lowercased()
-                .trimmingCharacters(
-                    in: .whitespacesAndNewlines
-                )
+        let cleaned = text
+            .lowercased()
+            .replacingOccurrences(of: "’", with: "'")
+            .replacingOccurrences(
+                of: "[^a-z0-9' ]",
+                with: " ",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: "\\s+",
+                with: " ",
+                options: .regularExpression
+            )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
         let exitPhrases = [
             "bye",
@@ -328,20 +249,19 @@ struct ContentView: View {
             "i'm done",
             "im done",
             "i am done",
+            "i'm finished",
+            "im finished",
+            "i am finished",
             "stop conversation",
             "end conversation"
         ]
 
-        // Require the exit phrase to be a complete word/phrase.
-        return exitPhrases.contains { phrase in
-
-            text == phrase ||
-            text.hasPrefix(phrase + " ") ||
-            text.hasSuffix(" " + phrase)
+        return exitPhrases.contains {
+            cleaned == $0 || cleaned.hasSuffix(" " + $0)
         }
     }
 
-    // End the hands-free conversation.
+    // Stop the session, say goodbye, and return to the starting screen.
     private func endConversation() async {
 
         conversationActive = false
@@ -350,17 +270,47 @@ struct ContentView: View {
             _ = await stopListening()
         }
 
+        isWaitingForAI = false
+        isFinishingTurn = false
+
         speechSynthesizer.stopSpeaking()
 
-        let goodbye =
-            "Okay, talk to you later!"
+        aiResponse = "Okay, talk to you later!"
+        speechSynthesizer.speak(aiResponse)
 
-        aiResponse = goodbye
+        // Wait before deactivating audio, so goodbye can finish.
+        await speechSynthesizer.waitUntilFinished()
 
-        speechSynthesizer.speak(goodbye)
+        audioManager.deactivateAudioSession()
+        aiService.resetConversation()
+
+        recognizedText = ""
+        finalRecognizedText = ""
+        aiResponse = ""
+        statusMessage = ""
     }
 
-    // Reset everything and start a fresh Gemini chat.
+    // Handle errors without accidentally restarting the microphone.
+    private func stopWithMessage(_ message: String) async {
+
+        conversationActive = false
+        isWaitingForAI = false
+        isFinishingTurn = false
+
+        if isListening {
+            _ = await stopListening()
+        }
+
+        statusMessage = message
+
+        speechSynthesizer.stopSpeaking()
+        speechSynthesizer.speak(message)
+        await speechSynthesizer.waitUntilFinished()
+
+        audioManager.deactivateAudioSession()
+    }
+
+    // Start a completely new chat.
     private func newChat() async {
 
         conversationActive = false
@@ -370,14 +320,35 @@ struct ContentView: View {
         }
 
         speechSynthesizer.stopSpeaking()
-
+        audioManager.deactivateAudioSession()
         aiService.resetConversation()
+
+        isFinishingTurn = false
+        isWaitingForAI = false
 
         recognizedText = ""
         finalRecognizedText = ""
         aiResponse = ""
         statusMessage = ""
-        isWaitingForAI = false
+    }
+
+    // Reuse the same layout for each text panel.
+    private func textPanel(
+        _ title: String,
+        value: String,
+        emptyText: String
+    ) -> some View {
+
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.headline)
+
+            Text(value.isEmpty ? emptyText : value)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+                .background(.gray.opacity(0.1))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+        }
     }
 
     var body: some View {
@@ -388,132 +359,50 @@ struct ContentView: View {
                 .font(.largeTitle)
                 .fontWeight(.bold)
 
-            // Show what Car Buddy is doing.
             Text(
-                conversationActive
-                ? (
-                    isWaitingForAI
-                    ? "Thinking..."
-                    : isListening
-                        ? "Listening..."
-                        : "Speaking..."
-                )
-                : "Ready to talk"
+                !conversationActive
+                    ? "Ready to talk"
+                    : isWaitingForAI
+                        ? "Thinking..."
+                        : isFinishingTurn
+                            ? "Finishing your sentence..."
+                            : isListening
+                                ? "Listening..."
+                                : "Speaking..."
             )
             .foregroundStyle(.secondary)
 
-            // Live speech.
-            VStack(
-                alignment: .leading,
-                spacing: 10
-            ) {
+            textPanel(
+                "You said:",
+                value: recognizedText,
+                emptyText: "Nothing yet..."
+            )
 
-                Text("You said:")
-                    .font(.headline)
+            textPanel(
+                "Final sentence:",
+                value: finalRecognizedText,
+                emptyText: "Waiting for final result..."
+            )
 
-                Text(
-                    recognizedText.isEmpty
-                    ? "Nothing yet..."
-                    : recognizedText
-                )
-                .frame(
-                    maxWidth: .infinity,
-                    alignment: .leading
-                )
-                .padding()
-                .background(
-                    .gray.opacity(0.1)
-                )
-                .clipShape(
-                    RoundedRectangle(
-                        cornerRadius: 12
-                    )
-                )
+            textPanel(
+                "Car Buddy:",
+                value: aiResponse,
+                emptyText: "No response yet..."
+            )
+
+            if !statusMessage.isEmpty {
+                Text(statusMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
 
-            // Final sentence.
-            VStack(
-                alignment: .leading,
-                spacing: 10
-            ) {
-
-                Text("Final sentence:")
-                    .font(.headline)
-
-                Text(
-                    finalRecognizedText.isEmpty
-                    ? "Waiting for final result..."
-                    : finalRecognizedText
-                )
-                .frame(
-                    maxWidth: .infinity,
-                    alignment: .leading
-                )
-                .padding()
-                .background(
-                    .gray.opacity(0.1)
-                )
-                .clipShape(
-                    RoundedRectangle(
-                        cornerRadius: 12
-                    )
-                )
-            }
-
-            // Gemini's answer.
-            VStack(
-                alignment: .leading,
-                spacing: 10
-            ) {
-
-                Text("Car Buddy:")
-                    .font(.headline)
-
-                Text(
-                    aiResponse.isEmpty
-                    ? "No response yet..."
-                    : aiResponse
-                )
-                .frame(
-                    maxWidth: .infinity,
-                    alignment: .leading
-                )
-                .padding()
-                .background(
-                    .gray.opacity(0.1)
-                )
-                .clipShape(
-                    RoundedRectangle(
-                        cornerRadius: 12
-                    )
-                )
-
-                // Show errors or status messages.
-                if !statusMessage.isEmpty {
-
-                    Text(statusMessage)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            // One tap starts the conversation.
-            // The conversation then runs hands-free.
             Button(
-                conversationActive
-                ? "END CONVERSATION"
-                : "ASK AI"
+                conversationActive ? "END CONVERSATION" : "ASK AI"
             ) {
-
-                if conversationActive {
-
-                    Task {
+                Task {
+                    if conversationActive {
                         await endConversation()
-                    }
-
-                } else {
-
-                    Task {
+                    } else {
                         await startConversation()
                     }
                 }
@@ -521,26 +410,19 @@ struct ContentView: View {
             .font(.headline)
             .buttonStyle(.bordered)
 
-            // Stop Apple's voice.
+            // Stop the current spoken answer. Listening resumes afterward.
             Button("STOP ANSWERING") {
-
                 speechSynthesizer.stopSpeaking()
             }
 
-            // Start a fresh Gemini conversation.
             Button("NEW CHAT") {
-
                 Task {
                     await newChat()
                 }
             }
 
-            // Show this while Gemini is working.
             if isWaitingForAI {
-
-                ProgressView(
-                    "Car Buddy is thinking..."
-                )
+                ProgressView("Car Buddy is thinking...")
             }
         }
         .padding()

@@ -1,54 +1,100 @@
 import AVFoundation
 
 // Apple's built-in text-to-speech.
-// Gemini is not used for voice.
+// Car Buddy waits for the real completion event before listening again.
 
 @MainActor
-final class SpeechSynthesizer {
+final class SpeechSynthesizer: NSObject {
 
-    // Apple's speech engine.
-    private let synthesizer =
-        AVSpeechSynthesizer()
+    private let synthesizer = AVSpeechSynthesizer()
 
-    // Speak the AI response.
-    func speak(_ text: String) {
+    // Tracks the sentence currently being spoken.
+    private var currentUtterance: AVSpeechUtterance?
 
-        let utterance =
-            AVSpeechUtterance(
-                string: text
-            )
+    // Lets the conversation resume when speech finishes or is stopped.
+    private var finishContinuation: CheckedContinuation<Void, Never>?
 
-        // Use Apple's US English voice.
-        utterance.voice =
-            AVSpeechSynthesisVoice(
-                language: "en-US"
-            )
-        
-        // Speaking speed.
-        utterance.rate = 0.5
+    private var speechFinished = true
 
-        synthesizer.speak(
-            utterance
-        )
+    override init() {
+        super.init()
+        synthesizer.delegate = self
     }
 
-    // Wait until Apple finishes speaking.
+    // Speak using your existing Apple voice.
+    func speak(_ text: String) {
+
+        // Stop any previous response before starting another.
+        stopSpeaking()
+
+        let utterance = AVSpeechUtterance(string: text)
+
+        // Keep your preferred voice settings unchanged.
+        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        utterance.rate = 0.5
+
+        currentUtterance = utterance
+        speechFinished = false
+
+        synthesizer.speak(utterance)
+    }
+
+    // Wait for Apple's actual completion/cancellation callback.
     func waitUntilFinished() async {
 
-        while synthesizer.isSpeaking {
+        guard !speechFinished else { return }
 
-            try? await Task.sleep(
-                nanoseconds:
-                    100_000_000
-            )
+        await withCheckedContinuation { continuation in
+            finishContinuation = continuation
         }
     }
 
-    // Stop speaking immediately.
+    // Stop speaking immediately; the conversation can then resume.
     func stopSpeaking() {
+        synthesizer.stopSpeaking(at: .immediate)
+        completeCurrentSpeech()
+    }
 
-        synthesizer.stopSpeaking(
-            at: .immediate
-        )
+    // Mark the current utterance finished and resume any waiting task.
+    private func completeCurrentSpeech(
+        for utterance: AVSpeechUtterance? = nil
+    ) {
+
+        // Ignore a late callback from an older sentence.
+        if let utterance {
+            guard let currentUtterance,
+                  currentUtterance === utterance else {
+                return
+            }
+        }
+
+        currentUtterance = nil
+        speechFinished = true
+
+        let continuation = finishContinuation
+        finishContinuation = nil
+        continuation?.resume()
+    }
+}
+
+// Apple calls these when speaking actually finishes or is cancelled.
+extension SpeechSynthesizer: AVSpeechSynthesizerDelegate {
+
+    nonisolated func speechSynthesizer(
+        _ synthesizer: AVSpeechSynthesizer,
+        didFinish utterance: AVSpeechUtterance
+    ) {
+        Task { @MainActor in
+            self.completeCurrentSpeech(for: utterance)
+        }
+    }
+
+    nonisolated func speechSynthesizer(
+        _ synthesizer: AVSpeechSynthesizer,
+        didCancel utterance: AVSpeechUtterance
+    ) {
+        Task { @MainActor in
+            self.completeCurrentSpeech(for: utterance)
+        }
     }
 }
