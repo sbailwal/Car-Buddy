@@ -7,9 +7,7 @@ struct ContentView: View {
     @State private var conversationActive = false
     @State private var isFinishingTurn = false
     @State private var isWaitingForAI = false
-    
-    // Prevent the startup test alert from running twice.
-    @State private var didSimulateStartupAlert = false
+    @State private var didSpeakLaunchGreeting = false
 
     @State private var recognizedText = ""
     @State private var finalRecognizedText = ""
@@ -310,7 +308,7 @@ struct ContentView: View {
         return finalText
     }
 
-    // Normalize punctuation so "Bye." and "I'm done!" work.
+    // Detect exit phrases even when speech recognition adds punctuation.
     private func shouldEndConversation(_ text: String) -> Bool {
 
         let cleaned = text
@@ -328,9 +326,13 @@ struct ContentView: View {
             )
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
+        let exactExitWords = ["bye", "goodbye", "stop", "exit"]
+
+        if exactExitWords.contains(cleaned) {
+            return true
+        }
+
         let exitPhrases = [
-            "bye",
-            "goodbye",
             "i'm done",
             "im done",
             "i am done",
@@ -395,28 +397,6 @@ struct ContentView: View {
         audioManager.deactivateAudioSession()
     }
 
-    // Start a completely new chat.
-    private func newChat() async {
-
-        conversationActive = false
-
-        if isListening {
-            _ = await stopListening()
-        }
-
-        speechSynthesizer.stopSpeaking()
-        audioManager.deactivateAudioSession()
-        aiService.resetConversation()
-
-        isFinishingTurn = false
-        isWaitingForAI = false
-
-        recognizedText = ""
-        finalRecognizedText = ""
-        aiResponse = ""
-        statusMessage = ""
-    }
-
     // Reuse the same layout for each text panel.
     private func textPanel(
         _ title: String,
@@ -436,6 +416,18 @@ struct ContentView: View {
         }
     }
 
+    // Welcome the driver when Car Buddy opens.
+    private func speakLaunchGreeting() {
+
+        // Prevent the greeting from repeating.
+        guard !didSpeakLaunchGreeting else { return }
+        didSpeakLaunchGreeting = true
+
+        speechSynthesizer.speak(
+            "Hey, I'm Dweezy, your Car Buddy co-passenger. I'm here to help you stay safe on the road. Happy driving!"
+        )
+    }
+    
     var body: some View {
 
         VStack(spacing: 25) {
@@ -463,11 +455,11 @@ struct ContentView: View {
                 emptyText: "Nothing yet..."
             )
 
-            textPanel(
-                "Final sentence:",
-                value: finalRecognizedText,
-                emptyText: "Waiting for final result..."
-            )
+//            textPanel(
+//                "Final sentence:",
+//                value: finalRecognizedText,
+//                emptyText: "Waiting for final result..."
+//            )
 
             textPanel(
                 "Car Buddy:",
@@ -481,6 +473,29 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
 
+            HStack(spacing: 10) {
+
+                Button("DROWSY DRIVER") {
+                    Task {
+                        await triggerSafetyAlert(mode: "DROWSY")
+                    }
+                }
+
+                Button("DISTRACTED DRIVER") {
+                    Task {
+                        await triggerSafetyAlert(mode: "DISTRACTED")
+                    }
+                }
+
+                Button("SPEEDING DRIVER") {
+                    Task {
+                        await triggerSafetyAlert(mode: "SPEEDING")
+                    }
+                }
+            }
+            .buttonStyle(.bordered)
+            .disabled(conversationActive || isWaitingForAI)
+            
             Button(
                 conversationActive ? "END CONVERSATION" : "ASK AI"
             ) {
@@ -495,29 +510,13 @@ struct ContentView: View {
             .font(.headline)
             .buttonStyle(.bordered)
 
-            // Stop the current spoken answer. Listening resumes afterward.
-            Button("STOP ANSWERING") {
-                speechSynthesizer.stopSpeaking()
-            }
-
-            Button("NEW CHAT") {
-                Task {
-                    await newChat()
-                }
-            }
-
             if isWaitingForAI {
                 ProgressView("Car Buddy is thinking...")
             }
         }
         .padding()
         .task {
-            // Temporary test: simulate a drowsiness alert on launch.
-            guard !didSimulateStartupAlert else { return }
-
-            didSimulateStartupAlert = true
-
-            await triggerSafetyAlert(mode: "DROWSY") // "DROWSY" OR "DISTRACTED" or "SPEEDING"
+            speakLaunchGreeting()
         }
     }
 }

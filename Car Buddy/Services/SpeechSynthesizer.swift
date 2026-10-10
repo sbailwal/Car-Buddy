@@ -26,12 +26,18 @@ final class SpeechSynthesizer: NSObject {
 
         // Stop any previous response before starting another.
         stopSpeaking()
-
+        
         let utterance = AVSpeechUtterance(string: text)
 
-        // Keep your preferred voice settings unchanged.
-        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        // Select the exact Premium voice installed on your iPhone. Ava/Zoe
+            utterance.voice = AVSpeechSynthesisVoice(
+                identifier: "com.apple.voice.premium.en-US.Zoe"
+            )
+        
+//        // Keep your preferred voice settings unchanged.
+//        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         utterance.rate = 0.5
+//        utterance.pitchMultiplier = 1.08
 
         currentUtterance = utterance
         speechFinished = false
@@ -57,13 +63,14 @@ final class SpeechSynthesizer: NSObject {
 
     // Mark the current utterance finished and resume any waiting task.
     private func completeCurrentSpeech(
-        for utterance: AVSpeechUtterance? = nil
+        for utteranceID: ObjectIdentifier? = nil
     ) {
 
         // Ignore a late callback from an older sentence.
-        if let utterance {
+        if let utteranceID {
             guard let currentUtterance,
-                  currentUtterance === utterance else {
+                  ObjectIdentifier(currentUtterance) == utteranceID
+            else {
                 return
             }
         }
@@ -84,8 +91,10 @@ extension SpeechSynthesizer: AVSpeechSynthesizerDelegate {
         _ synthesizer: AVSpeechSynthesizer,
         didFinish utterance: AVSpeechUtterance
     ) {
+        let utteranceID = ObjectIdentifier(utterance)
+        
         Task { @MainActor in
-            self.completeCurrentSpeech(for: utterance)
+            self.completeCurrentSpeech(for: utteranceID)
         }
     }
 
@@ -93,8 +102,10 @@ extension SpeechSynthesizer: AVSpeechSynthesizerDelegate {
         _ synthesizer: AVSpeechSynthesizer,
         didCancel utterance: AVSpeechUtterance
     ) {
+        let utteranceID = ObjectIdentifier(utterance)
+        
         Task { @MainActor in
-            self.completeCurrentSpeech(for: utterance)
+            self.completeCurrentSpeech(for: utteranceID)
         }
     }
 }
