@@ -16,7 +16,6 @@ final class AIService {
     // Try each model if Google returns 503.
     private let models = [
         "gemini-3.8-flash",
-        "gemini-3.7-flash",
         "gemini-3.6-flash"
     ]
     
@@ -66,7 +65,6 @@ final class AIService {
     }
 
     private struct ContentPart: Decodable {
-        let type: String?
         let text: String?
     }
 

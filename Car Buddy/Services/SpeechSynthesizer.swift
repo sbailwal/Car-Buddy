@@ -30,14 +30,10 @@ final class SpeechSynthesizer: NSObject {
         let utterance = AVSpeechUtterance(string: text)
 
         // Select the exact Premium voice installed on your iPhone. Ava/Zoe
-            utterance.voice = AVSpeechSynthesisVoice(
-                identifier: "com.apple.voice.premium.en-US.Zoe"
-            )
-        
-//        // Keep your preferred voice settings unchanged.
-//        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        utterance.voice = AVSpeechSynthesisVoice(
+            identifier: "com.apple.voice.premium.en-US.Zoe"
+        )
         utterance.rate = 0.5
-//        utterance.pitchMultiplier = 1.08
 
         currentUtterance = utterance
         speechFinished = false

@@ -455,12 +455,6 @@ struct ContentView: View {
                 emptyText: "Nothing yet..."
             )
 
-//            textPanel(
-//                "Final sentence:",
-//                value: finalRecognizedText,
-//                emptyText: "Waiting for final result..."
-//            )
-
             textPanel(
                 "Car Buddy:",
                 value: aiResponse,
